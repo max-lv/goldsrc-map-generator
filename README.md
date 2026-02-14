@@ -1,0 +1,1 @@
+This is random map generator for goldsrc games. By taking tiles created in regular Hammer Editor this python script reassembles them into unique maps. 
