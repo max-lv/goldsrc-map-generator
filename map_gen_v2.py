@@ -97,22 +97,37 @@ def gather_brushes(map_, ignore_connector=True):
     return brushes
 
 
-def is_brush_intersect(brush_a, brush_b):
-    a = min_max(brush_a)
-    b = min_max(brush_b)
+def is_brush_intersect(brush_a, brush_b, expand=0):
+    if isinstance(brush_a, p.Brush):
+        a = min_max(brush_a)
+    else:
+        a = brush_a # bbox
+
+    if isinstance(brush_b, p.Brush):
+        b = min_max(brush_b)
+    else:
+        b = brush_b # bbox
 
     intersected_axis = []
     for i in range(3):
         a_min, a_max = a[i]
         b_min, b_max = b[i]
+        a_min -= expand
+        b_min -= expand
+        a_max += expand
+        b_max += expand
         intersected_axis.append(a_min < b_max and a_max > b_min)
 
     return intersected_axis
 
 
 def is_entity_inside_brush(ent, brush):
-    a = min_max(brush)
-    ent_vec = [int(x) for x in ent.params["origin"].split()]
+    if isinstance(brush, p.Brush):
+        a = min_max(brush)
+    else:
+        a = brush # bbox
+
+    ent_vec = [float(x) for x in ent.params["origin"].split()]
 
     intersected_axis = []
     for i in range(3):
@@ -271,58 +286,138 @@ def slice_map_into_tiles(map_):
     """Given map with multiple tiles, this function finds brush and enity groups and returns list of these groups (tiles)"""
     empty = p.parse_map(open("tiles/empty.map"))
 
-
     groups = {}
-    group_bboxes = []
-    for ent in map_.entities:
-        if ent.params["classname"] == "info_tile":
-            print("info_tile:", ent)
-            group_bboxes.append(ent)
-
     worldspawn_indexes = []
     entity_indexes = []
 
-    for idx, group_bbox in enumerate(group_bboxes):
-        print("-------")
-        for brush_idx, brush in enumerate(map_.worldspawn.brushes):
-            if brush_idx in worldspawn_indexes:
+    for brush_idx, brush in enumerate(map_.worldspawn.brushes):
+        if brush_idx in worldspawn_indexes:
+            continue
+
+        groups[brush_idx] = copy.deepcopy(empty)
+        groups[brush_idx].worldspawn.brushes.append(brush)
+        worldspawn_indexes.append(brush_idx)
+
+        for other_brush_idx, other_brush in enumerate(map_.worldspawn.brushes[brush_idx + 1:]):
+            other_brush_idx += brush_idx + 1
+            if other_brush_idx in worldspawn_indexes:
                 continue
 
-            # check for bbox collisions
-            axis = is_brush_intersect(brush, group_bbox.brushes[0])
-            if axis[0] and axis[1]:
-                if idx not in groups:
-                    groups[idx] = copy.deepcopy(empty)
-                groups[idx].worldspawn.brushes.append(brush)
-                worldspawn_indexes.append(brush_idx)
-        else:
-            print("This brush is not part of any group:", brush)
+            axis = is_brush_intersect(brush, other_brush, expand=31)
 
+            if axis[0] and axis[1]:
+                groups[brush_idx].worldspawn.brushes.append(other_brush)
+                worldspawn_indexes.append(other_brush_idx)
+
+    # Look for leftover brushes
+    if len(worldspawn_indexes) < len(map_.worldspawn.brushes):
+        print(f"error: there is leftover brushes ({len(worldspawn_indexes) - len(map_.worldspawn.brushes)})")
+
+    def calculate_bbox(map_):
+        bbox = None
+        for brush in map_.worldspawn.brushes:
+            x, y, z = min_max(brush)
+            if bbox is None:
+                bbox = (x,y,z)
+
+            x1,y1,z1 = bbox
+            x = (min(x[0], x1[0]), max(x[1], x1[1]))
+            y = (min(y[0], y1[0]), max(y[1], y1[1]))
+            z = (min(z[0], z1[0]), max(z[1], z1[1]))
+            bbox = (x,y,z)
+        return bbox
+
+    while True:
+        for gidx1, g1 in groups.items():
+            bbox1 = calculate_bbox(g1)
+            merged_indexes = []
+            for gidx2, g2 in groups.items():
+                if gidx1 == gidx2:
+                    continue
+
+                bbox2 = calculate_bbox(g2)
+                axis = is_brush_intersect(bbox1, bbox2, expand=28)
+                if axis[0] and axis[1]:
+                    groups[gidx1].merge(groups[gidx2])
+                    merged_indexes.append(gidx2)
+                    print(f"merge {gidx1} {gidx2}")
+
+            for idx in merged_indexes:
+                del groups[idx]
+
+            if len(merged_indexes) > 0:
+                break
+        else:
+            break
+
+    # Get bboxes
+    group_bboxes = {}
+    for i, g in groups.items():
+        group_bboxes[i] = calculate_bbox(g)
+
+    for gidx, bbox in group_bboxes.items():
         for ent_idx, ent in enumerate(map_.entities):
             if ent_idx in entity_indexes:
-                continue
+                    continue
 
             if ent.params["classname"] == "info_tile":
+                entity_indexes.append(ent_idx)
                 continue
 
-            print(ent)
             if len(ent.brushes) > 0:
-                # FIXME: check every brush of entity
-                axis = is_brush_intersect(ent.brushes[0], group_bbox.brushes[0])
+                for ent_brush in ent.brushes:
+                    axis = is_brush_intersect(ent_brush, bbox, expand=31)
+                    if axis[0] and axis[1]:
+                        break
             else:
-                axis = is_entity_inside_brush(ent, group_bbox.brushes[0])
-
+                axis = is_entity_inside_brush(ent, bbox)
+            
             if axis[0] and axis[1]:
-                if idx not in groups:
-                    groups[idx] = copy.deepcopy(empty)
-
-                groups[idx].entities.append(ent)
+                groups[gidx].entities.append(ent)
                 entity_indexes.append(ent_idx)
 
-    for i, g in enumerate(groups.values()):
-        name = f"asdf_test_tile_{i:03}.map"
-        g.write(name)
-        print("saved", name)
+    # Look for leftover brushes
+    if len(entity_indexes) < len(map_.entities):
+        print(f"error: there is leftover entities ({len(entity_indexes) - len(map_.entities)})")
+
+    print("total groups found:", len(groups))
+
+    # for i, g in enumerate(groups.values()):
+    #     name = f"debug_tile_{i:03}.map"
+    #     g.write(name)
+    #     print("saved", name)
+    #     print("   brushes:", len(g.worldspawn.brushes))
+    #     print("  entities:", len(g.entities))
+
+    return groups.values()
+
+
+def check_tile_has_connector(tile):
+    for ent in tile.entities:
+        if ent.params.get("classname") == "info_connector":
+            return True
+    return False
+
+
+def divide_tiles(tiles):
+    start_tiles = []
+    cap_tiles = []
+    other_tiles = []
+    for tile in tiles:
+        count = 0
+        for ent in tile.entities:
+            if ent.params.get("classname") == "info_player_start":
+                start_tiles.append(tile)
+                break
+            if ent.params.get("classname") == "info_connector":
+                count += 1
+        else:
+            if count == 1:
+                cap_tiles.append(tile)
+            else:
+                other_tiles.append(tile)
+
+    return start_tiles, cap_tiles, other_tiles
 
 def main():
     if LOCK_SEED:
@@ -334,8 +429,19 @@ def main():
         seed = random.randint(100_000_000, 999_999_999)
     random.seed(seed)
 
-    map_ = p.parse_map(open("tiles/test_group_tileset.map"))
-    slice_map_into_tiles(map_)
+    map_ = p.parse_map(open("tiles/test_group_tileset2.map"))
+    tiles = slice_map_into_tiles(map_)
+
+    for tile in tiles:
+        if not check_tile_has_connector(tile):
+            print("Tile doesn't have info_connector")
+
+    start_tiles, cap_tiles, tiles = divide_tiles(tiles)
+
+    print("start_tiles:", len(start_tiles))
+    print("  cap_tiles:", len(cap_tiles))
+    print("      tiles:", len(tiles))
+
     exit(1)
 
     tilesets = load_tiles(Path("./tilesets"))
