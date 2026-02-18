@@ -21,9 +21,22 @@ OVERRIDE_SEED = 0#436750099
 # - for 1 brush (what about ducts?)
 
 # TODO / IDEAS:
-# - set boundary_limit dynamically by checking cap tiles dimensions
+# -- set boundary_limit dynamically by checking cap tiles dimensions
+# - auto-set direction for connectors (based on center)
+# - auto name connectors
+# - ignore stay connectors if its only block in tile (So you could have connector to the side of easy copying)
+
+# New workflow:
+# 1. Load tilesets
+# 2. Divide group-maps into smaller tilesets
+#   - make sure to autoname them (based on entrances)
+# 3. Test tiles
+#   - self-intersection
+# 4. Generate
+
 
 def center(ent):
+    """Calculates center of a brush-entity"""
     xs = []
     ys = []
     zs = []
@@ -36,6 +49,13 @@ def center(ent):
 
 
 def min_max(brush):
+    """For brush finds bounding box, returns:
+        (
+            (min x, max x),
+            (min y, max y),
+            (min z, max z),
+        )
+    """
     xs = []
     ys = []
     zs = []
@@ -68,32 +88,49 @@ def vec_diff(a, b):
     return [x1-x2, y1-y2, z1-z2]
 
 
-def gather_brushes(map_):
+def gather_brushes(map_, ignore_connector=True):
     brushes = [*map_.worldspawn.brushes]
     for ent in map_.entities:
-        if ent.params["classname"] == "info_connector":
+        if ignore_connector and ent.params["classname"] == "info_connector":
             continue
         brushes += ent.brushes
     return brushes
 
 
-def is_intersect(root, tmp_tile):
+def is_brush_intersect(brush_a, brush_b):
+    a = min_max(brush_a)
+    b = min_max(brush_b)
+
+    intersected_axis = []
+    for i in range(3):
+        a_min, a_max = a[i]
+        b_min, b_max = b[i]
+        intersected_axis.append(a_min < b_max and a_max > b_min)
+
+    return intersected_axis
+
+
+def is_entity_inside_brush(ent, brush):
+    a = min_max(brush)
+    ent_vec = [int(x) for x in ent.params["origin"].split()]
+
+    intersected_axis = []
+    for i in range(3):
+        a_min, a_max = a[i]
+        intersected_axis.append(a_min < ent_vec[i] and a_max > ent_vec[i])
+
+    return intersected_axis
+
+
+def is_tile_intersect(root, tmp_tile):
     root_brushes = gather_brushes(root)
     tile_brushes = gather_brushes(tmp_tile)
 
     for brush_a in root_brushes:
         for brush_b in tile_brushes:
-            a = min_max(brush_a)
-            b = min_max(brush_b)
+            axis = is_brush_intersect(brush_a, brush_b)
 
-            strike = 0
-            for i in range(3):
-                a_min, a_max = a[i]
-                b_min, b_max = b[i]
-                if a_min < b_max and a_max > b_min:
-                    strike += 1
-
-            if strike == 3:
+            if all(axis):
                 print(brush_a)
                 print(brush_b)
                 if str(brush_a) == str(brush_b):
@@ -104,6 +141,7 @@ def is_intersect(root, tmp_tile):
             #     print("Ok")
     return False
 
+
 def is_outside_world_boundry(tmp_tile):
     for brush in tmp_tile.worldspawn.brushes:
         a = min_max(brush)
@@ -112,6 +150,7 @@ def is_outside_world_boundry(tmp_tile):
                 if a[i][j] > BOUNDARY_LIMIT or a[i][j] < -BOUNDARY_LIMIT:
                     return True
     return False
+
 
 def load_tileset(tileset_dir: Path):
     print("loading tileset:", tileset_dir)
@@ -158,6 +197,7 @@ def load_tiles(root_dir: Path):
 
     return tilesets
 
+
 def rename_entities(tile, prefix: int):
     """ Rename certain values of properties to avoid collision.
         Example:
@@ -185,7 +225,6 @@ def rename_entities(tile, prefix: int):
                     continue
                 else:
                     ent.params[name] = f"tile{prefix:03}_{ent.params[name]}"
-
 
 
 def apply_special_count(root):
@@ -228,6 +267,63 @@ def apply_entity_mapgen_choice(tile):
     tile.entities = other_entities
 
 
+def slice_map_into_tiles(map_):
+    """Given map with multiple tiles, this function finds brush and enity groups and returns list of these groups (tiles)"""
+    empty = p.parse_map(open("tiles/empty.map"))
+
+
+    groups = {}
+    group_bboxes = []
+    for ent in map_.entities:
+        if ent.params["classname"] == "info_tile":
+            print("info_tile:", ent)
+            group_bboxes.append(ent)
+
+    worldspawn_indexes = []
+    entity_indexes = []
+
+    for idx, group_bbox in enumerate(group_bboxes):
+        print("-------")
+        for brush_idx, brush in enumerate(map_.worldspawn.brushes):
+            if brush_idx in worldspawn_indexes:
+                continue
+
+            # check for bbox collisions
+            axis = is_brush_intersect(brush, group_bbox.brushes[0])
+            if axis[0] and axis[1]:
+                if idx not in groups:
+                    groups[idx] = copy.deepcopy(empty)
+                groups[idx].worldspawn.brushes.append(brush)
+                worldspawn_indexes.append(brush_idx)
+        else:
+            print("This brush is not part of any group:", brush)
+
+        for ent_idx, ent in enumerate(map_.entities):
+            if ent_idx in entity_indexes:
+                continue
+
+            if ent.params["classname"] == "info_tile":
+                continue
+
+            print(ent)
+            if len(ent.brushes) > 0:
+                # FIXME: check every brush of entity
+                axis = is_brush_intersect(ent.brushes[0], group_bbox.brushes[0])
+            else:
+                axis = is_entity_inside_brush(ent, group_bbox.brushes[0])
+
+            if axis[0] and axis[1]:
+                if idx not in groups:
+                    groups[idx] = copy.deepcopy(empty)
+
+                groups[idx].entities.append(ent)
+                entity_indexes.append(ent_idx)
+
+    for i, g in enumerate(groups.values()):
+        name = f"asdf_test_tile_{i:03}.map"
+        g.write(name)
+        print("saved", name)
+
 def main():
     if LOCK_SEED:
         seed = 1337
@@ -237,6 +333,10 @@ def main():
     else:
         seed = random.randint(100_000_000, 999_999_999)
     random.seed(seed)
+
+    map_ = p.parse_map(open("tiles/test_group_tileset.map"))
+    slice_map_into_tiles(map_)
+    exit(1)
 
     tilesets = load_tiles(Path("./tilesets"))
     start_tiles, cap_tiles, tiles = tilesets["simple"]
@@ -317,7 +417,7 @@ def main():
             # Now that new tile is in place, we have to check
             # for brush collision before merging
             print("debug:", tile_name, len(tmp_tile.worldspawn.brushes))
-            if is_intersect(root, tmp_tile):
+            if is_tile_intersect(root, tmp_tile):
                 # tile didn't fit
                 # choose different tile
                 # todo: try different connector
