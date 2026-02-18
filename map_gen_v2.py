@@ -407,17 +407,58 @@ def divide_tiles(tiles):
         count = 0
         for ent in tile.entities:
             if ent.params.get("classname") == "info_player_start":
-                start_tiles.append(tile)
+                start_tiles.append((tile, "group_tile"))
                 break
             if ent.params.get("classname") == "info_connector":
                 count += 1
         else:
             if count == 1:
-                cap_tiles.append(tile)
+                cap_tiles.append((tile, "group_tile"))
             else:
-                other_tiles.append(tile)
+                other_tiles.append((tile, "group_tile"))
 
     return start_tiles, cap_tiles, other_tiles
+
+
+def auto_name_connectors(tiles):
+    def get_brush_size(brush):
+        x,y,z = min_max(brush)
+        x = x[1] - x[0]
+        y = y[1] - y[0]
+        z = z[1] - z[0]
+        x,y = min(x,y), max(x,y)
+        return int(x), int(y), int(z)
+
+    # Step 1. Gather names of connectors
+    names = dict()
+    for tile in tiles:
+        for ent in tile.entities:
+            if ent.params.get("classname") == "info_connector":
+                size = get_brush_size(ent.brushes[0])
+                name = ent.params.get("name")
+                if name is not None:
+                    if size not in names:
+                        names[size] = list()
+                    names[size].append(name)
+
+    # Step 2. Auto-name connectors without names
+    #         (using names we gathered or making up new ones)
+    #         If there are multiple names for this size of connector and
+    #         we found unnamed - print error
+    for tile in tiles:
+        for ent in tile.entities:
+            if ent.params.get("classname") == "info_connector":
+                size = get_brush_size(ent.brushes[0])
+                name = ent.params.get("name")
+                if name is None:
+                    if size in names:
+                        if len(names) > 1:
+                            raise Exception("Unnamed tile with size {size} has multiple names {names[size]}. Missed a name?")
+                        else:
+                            ent.params["name"] = names[size]
+                    else:
+                        ent.params["name"] = f"auto_name__{size}"
+
 
 def main():
     if LOCK_SEED:
@@ -431,6 +472,7 @@ def main():
 
     map_ = p.parse_map(open("tiles/test_group_tileset2.map"))
     tiles = slice_map_into_tiles(map_)
+    auto_name_connectors(tiles)
 
     for tile in tiles:
         if not check_tile_has_connector(tile):
@@ -442,10 +484,10 @@ def main():
     print("  cap_tiles:", len(cap_tiles))
     print("      tiles:", len(tiles))
 
-    exit(1)
+    # exit(1)
 
-    tilesets = load_tiles(Path("./tilesets"))
-    start_tiles, cap_tiles, tiles = tilesets["simple"]
+    # tilesets = load_tiles(Path("./tilesets"))
+    # start_tiles, cap_tiles, tiles = tilesets["simple"]
     root = p.parse_map(open("tiles/empty.map"))
 
     xxx_crates = p.parse_map(open("tilesets/simple/crates_empty.map"))
